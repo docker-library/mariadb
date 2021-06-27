@@ -339,8 +339,8 @@ unique_list() {
 	declare -A map
 
 	for item in "$@"; do
-		if [ -n "${item}" ]; then
-			map["${item}"]=true
+		if [ -n "$item" ]; then
+			map["$item"]=true
 		fi
 	done
 
@@ -360,8 +360,8 @@ get_ips() {
 
 	# DNS reverse lookup from hostname to IP address
 	for hostname in $(unique_list $(hostname) $(hostname --short) $(hostname --long) $(hostname --all-fqdns)); do
-		if ip="$(getent ahosts "${hostname}")"; then
-			ip=($(echo "${ip}" | grep STREAM))
+		if ip="$(getent ahosts "$hostname")"; then
+			ip=($(echo "$ip" | grep STREAM))
 			ips+=("${ip[0]}")
 		fi
 	done
@@ -377,7 +377,7 @@ get_hostnames() {
 
 	# DNS reverse lookup from IP address to hostname
 	for ip in $(get_ips); do
-		if hostname=($(getent hosts "${ip}")); then
+		if hostname=($(getent hosts "$ip")); then
 			hostnames+=("${hostname[1]}")
 		fi
 	done
@@ -431,6 +431,7 @@ docker_address_match() {
 wsrep_enable_new_cluster() {
 	local address="${WSREP_AUTO_BOOTSTRAP_ADDRESS:-$1}"; shift
 	local wsrepdir="$(mysql_get_config 'wsrep-data-home-dir' "$@")"
+	local wsrepaddr="$(mysql_get_config 'wsrep-node-address' "$@")"
 
 	# it removes URI schemes like gcomm://
 	address="${address#[[:graph:]]*://}"
@@ -442,9 +443,23 @@ wsrep_enable_new_cluster() {
 	address="${address%\?[[:graph:]]*}"
 
 	# it replaces commas ',' with spaces ' ' and converts it to array
-	address=( ${address//,/ } )
+	address=(${address//,/ })
 
-	[ -n "$address" ] && [ -z "$WSREP_SKIP_AUTO_BOOTSTRAP" ] && [ ! -s "$wsrepdir/gvwstate.dat" ] && docker_address_match "${address[0]}"
+	# first address from list of addresses. If item doesn't exist, returns an empty string
+	address="${address[0]:-}"
+
+	# it removes port suffix
+	wsrepaddr="${wsrepaddr%:[0-9]*}"
+
+	if [ -z "$address" ] || [ -n "$WSREP_SKIP_AUTO_BOOTSTRAP" ]  || [ -s "$wsrepdir/gvwstate.dat" ]; then
+		return 1
+	fi
+
+	if [ -n "$wsrepaddr" ]; then
+		[ "$wsrepaddr" = "$address" ]
+	else
+		docker_address_match "$address"
+	fi
 }
 
 # check arguments for an option that would cause mysqld to stop
