@@ -2,6 +2,9 @@
 set -eo pipefail
 shopt -s nullglob
 
+# Disable auto-completion feature because it mess up with scripts using tabulation \t for indentation
+bind -u complete
+
 # logging functions
 mysql_log() {
 	local type="$1"; shift
@@ -329,11 +332,69 @@ docker_setup_db() {
 	fi
 }
 
+# usage: unique_list <item1> <item2> ...
+#
+# it returns list with unique items
+unique_list() {
+	declare -A map
+
+	for item in "$@"; do
+		if [ -n "${item}" ]; then
+			map["${item}"]=true
+		fi
+	done
+
+	printf '%s ' "${!map[@]}"
+}
+
+# usage: get_ips
+#
+# it returns all machine IP addresses
+get_ips() {
+	ips=("127.0.0.1" $(hostname --all-ip-addresses))
+
+	# use default gateway to retrieve machine IP address. Destination address 8.8.8.8 doesn't have to be reachable
+	if ip=($(ip route get 8.8.8.8)); then
+		ips+=("${ip[6]}")
+	fi
+
+	# DNS reverse lookup from hostname to IP address
+	for hostname in $(unique_list $(hostname) $(hostname --short) $(hostname --long) $(hostname --all-fqdns)); do
+		if ip="$(getent ahosts "${hostname}")"; then
+			ip=($(echo "${ip}" | grep STREAM))
+			ips+=("${ip[0]}")
+		fi
+	done
+
+	unique_list "${ips[@]}"
+}
+
+# usage: get_hostnames
+#
+# it returns all machine DNS host names
+get_hostnames() {
+	hostnames=($(hostname) $(hostname --short) $(hostname --long) $(hostname --all-fqdns))
+
+	# DNS reverse lookup from IP address to hostname
+	for ip in $(get_ips); do
+		if hostname=($(getent hosts "${ip}")); then
+			hostnames+=("${hostname[1]}")
+		fi
+	done
+
+	# FQDN short names
+	for hostname in "${hostnames[@]}"; do
+		hostnames+=("${hostname%%.[[:graph:]]*}")
+	done
+
+	unique_list "${hostnames[@]}"
+}
+
 # usage: docker_hostname_match <hostname>
 #    ie: docker_hostname_match node1.cluster.local
 # it returns true if provided hostname match with container hostname. Otherwise it returns false
 docker_hostname_match() {
-	for hostname in $(hostname --all-fqdns); do
+	for hostname in $(get_hostnames); do
 		if [ "$hostname" = "$1" ]; then
 			return 0
 		fi
@@ -346,7 +407,7 @@ docker_hostname_match() {
 #    ie: docker_ip_match 192.168.1.13
 # it returns true if provided IP address match with container IP address. Otherwise it returns false
 docker_ip_match() {
-	for ip in $(hostname --all-ip-addresses); do
+	for ip in $(get_ips); do
 		if [ "$ip" = "$1" ]; then
 			return 0
 		fi
@@ -361,7 +422,7 @@ docker_ip_match() {
 docker_address_match() {
 	local resolved="$(resolveip --silent "$1" 2>/dev/null)" # it converts hostname to ip or vice versa
 
-	docker_ip_match "$resolved" || docker_ip_match "$1" || docker_hostname_match "$resolved" || docker_hostname_match "$1"
+	docker_hostname_match "$1" || docker_ip_match "${resolved}" || docker_hostname_match "${resolved}" || docker_ip_match "$1"
 }
 
 # usage: wsrep_enable_new_cluster <wsrep-cluster-address> [arg [arg [...]]]
@@ -373,6 +434,12 @@ wsrep_enable_new_cluster() {
 
 	# it removes URI schemes like gcomm://
 	address="${address#[[:graph:]]*://}"
+
+	# it removes port suffix per address
+	address="${address/:[0-9]*//}"
+
+	# it removes options suffix ?option1=value1[&option2=value2]
+	address="${address%\?[[:graph:]]*}"
 
 	# it replaces commas ',' with spaces ' ' and converts it to array
 	address=( ${address//,/ } )
