@@ -43,16 +43,15 @@ RUN set -eux; \
 
 RUN mkdir /docker-entrypoint-initdb.d
 
-# install "libjemalloc1/libjemalloc2" as it offers better performance in some cases. Use with LD_PRELOAD
+# install "libjemalloc2" as it offers better performance in some cases. Use with LD_PRELOAD
 # install "pwgen" for randomizing passwords
 # install "tzdata" for /usr/share/zoneinfo/
 # install "xz-utils" for .sql.xz docker-entrypoint-initdb.d files
 # install "zstd" for .sql.zst docker-entrypoint-initdb.d files
 RUN set -ex; \
 	apt-get update; \
-	if [ focal = focal ]; then JEMALLOC=libjemalloc2 ; else JEMALLOC=libjemalloc1 ; fi ; \
 	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-		$JEMALLOC \
+		libjemalloc2 \
 		pwgen \
 		tzdata \
 		xz-utils \
@@ -66,10 +65,15 @@ ENV GPG_KEYS \
 # uid           [ unknown] MariaDB Signing Key <signing-key@mariadb.org>
 # sub   rsa4096 2016-03-30 [E]
 	177F4010FE56CA3336300305F1656F24C74CD1D8
+
+# Allowing addition of REPOSITORY_KEY
+# to the key for REPOSITORY later
+ARG REPOSITORY_KEY=
+
 RUN set -ex; \
 	export GNUPGHOME="$(mktemp -d)"; \
-	for key in $GPG_KEYS; do \
-		gpg --batch --keyserver ha.pool.sks-keyservers.net --recv-keys "$key"; \
+	for key in $GPG_KEYS $REPOSITORY_KEY; do \
+		gpg --batch --keyserver keyserver.ubuntu.com --recv-keys "$key"; \
 	done; \
 	gpg --batch --export $GPG_KEYS > /etc/apt/trusted.gpg.d/mariadb.gpg; \
 	command -v gpgconf > /dev/null && gpgconf --kill all || :; \
@@ -77,13 +81,22 @@ RUN set -ex; \
 	apt-key list
 
 # bashbrew-architectures: amd64 arm64v8 ppc64le
-ENV MARIADB_MAJOR 10.3
-ENV MARIADB_VERSION 1:10.3.29+maria~focal
+ARG MARIADB_MAJOR=10.3
+ARG MARIADB_VERSION=1:10.3.30+maria~focal
 # release-status:Stable
 # (https://downloads.mariadb.org/mariadb/+releases/)
 
+# Allowing overriding of REPOSITORY, a URL that includes suite and component for testing and Enterprise Versions
+ARG REPOSITORY=
+
 RUN set -e;\
-	echo "deb https://ftp.osuosl.org/pub/mariadb/repo/$MARIADB_MAJOR/ubuntu focal main" > /etc/apt/sources.list.d/mariadb.list; \
+	{ \
+		if [ -n "${REPOSITORY}" ]; then \
+			echo "deb ${REPOSITORY}"; \
+		else \
+			echo "deb https://ftp.osuosl.org/pub/mariadb/repo/$MARIADB_MAJOR/ubuntu focal main"; \
+		fi ; \
+	}  > /etc/apt/sources.list.d/mariadb.list; \
 	{ \
 		echo 'Package: *'; \
 		echo 'Pin: release o=MariaDB'; \
@@ -118,7 +131,12 @@ RUN set -ex; \
 		| xargs -0 grep -lZE '^(bind-address|log|user\s)' \
 		| xargs -rt -0 sed -Ei 's/^(bind-address|log|user\s)/#&/'; \
 # don't reverse lookup hostnames, they are usually another container
-	echo '[mysqld]\nskip-host-cache\nskip-name-resolve' > /etc/mysql/conf.d/docker.cnf
+# Issue #327 Correct order of reading directories /etc/mysql/mariadb.conf.d before /etc/mysql/conf.d (mount-point per documentation)
+	if [ ! -L /etc/mysql/my.cnf ]; then sed -i -e '/includedir/i[mariadb]\nskip-host-cache\nskip-name-resolve\n' /etc/mysql/my.cnf; \
+# 10.5+
+	else sed -i -e '/includedir/ {N;s/\(.*\)\n\(.*\)/[mariadbd]\nskip-host-cache\nskip-name-resolve\n\n\2\n\1/}' \
+                /etc/mysql/mariadb.cnf; fi
+
 
 VOLUME /var/lib/mysql
 
