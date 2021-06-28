@@ -2,9 +2,6 @@
 set -eo pipefail
 shopt -s nullglob
 
-# Disable auto-completion feature because it mess up with scripts using tabulation \t for indentation
-bind -u complete
-
 # logging functions
 mysql_log() {
 	local type="$1"; shift
