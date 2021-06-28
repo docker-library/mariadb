@@ -422,7 +422,7 @@ docker_ip_match() {
 docker_address_match() {
 	local resolved="$(resolveip --silent "$1" 2>/dev/null)" # it converts hostname to ip or vice versa
 
-	docker_hostname_match "$1" || docker_ip_match "${resolved}" || docker_hostname_match "${resolved}" || docker_ip_match "$1"
+	docker_hostname_match "$1" || docker_ip_match "$1" || docker_hostname_match "$resolved" || docker_ip_match "$resolved"
 }
 
 # usage: wsrep_enable_new_cluster <wsrep-cluster-address> [arg [arg [...]]]
