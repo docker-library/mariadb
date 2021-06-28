@@ -422,31 +422,39 @@ docker_address_match() {
 	docker_hostname_match "$1" || docker_ip_match "$1" || docker_hostname_match "$resolved" || docker_ip_match "$resolved"
 }
 
-# usage: wsrep_enable_new_cluster <wsrep-cluster-address> [arg [arg [...]]]
-#    ie: wsrep_enable_new_cluster gcomm://node1,node2,node3 "$@"
-# it returns true if we need to set the --wsrep-new-cluster argument for the mysqld. Otherwise it returns false
-wsrep_enable_new_cluster() {
-	local address="${WSREP_AUTO_BOOTSTRAP_ADDRESS:-$1}"; shift
-	local wsrepdir="$(mysql_get_config 'wsrep-data-home-dir' "$@")"
-	local wsrepaddr="$(mysql_get_config 'wsrep-node-address' "$@")"
-
+# usage: wsrep_address_normalize <address>
+#    ie: wsrep_address_normalize gcomm://172.168.2.15
+# it always returns <address>:<port>
+wsrep_address_normalize() {
 	# it removes URI schemes like gcomm://
-	address="${address#[[:graph:]]*://}"
-
-	# it removes port suffix per address
-	address="${address/:[0-9]*//}"
+	address="${1##*://}"
 
 	# it removes options suffix ?option1=value1[&option2=value2]
-	address="${address%\?[[:graph:]]*}"
+	address="${address%%\?*}"
 
 	# it replaces commas ',' with spaces ' ' and converts it to array
 	address=(${address//,/ })
 
-	# first address from list of addresses. If item doesn't exist, returns an empty string
+	# first address from list of addresses. If item doesn't exist, returns empty string
 	address="${address[0]:-}"
 
-	# it removes port suffix
-	wsrepaddr="${wsrepaddr%:[0-9]*}"
+	case "$address" in
+		*:* | "")
+			;;
+		*)
+			address="${address}:4567";;
+	esac
+
+	echo "$address"
+}
+
+# usage: wsrep_enable_new_cluster <wsrep-cluster-address> [arg [arg [...]]]
+#    ie: wsrep_enable_new_cluster gcomm://node1,node2,node3 "$@"
+# it returns true if we need to set the --wsrep-new-cluster argument for the mysqld. Otherwise it returns false
+wsrep_enable_new_cluster() {
+	local address="$(wsrep_address_normalize "${WSREP_AUTO_BOOTSTRAP_ADDRESS:-$1}")"; shift
+	local wsrepdir="$(mysql_get_config 'wsrep-data-home-dir' "$@")"
+	local wsrepaddr="$(wsrep_address_normalize "$(mysql_get_config 'wsrep-node-address' "$@")")"
 
 	if [ -z "$address" ] || [ -n "$WSREP_SKIP_AUTO_BOOTSTRAP" ]  || [ -s "$wsrepdir/gvwstate.dat" ]; then
 		return 1
@@ -455,7 +463,7 @@ wsrep_enable_new_cluster() {
 	if [ -n "$wsrepaddr" ]; then
 		[ "$wsrepaddr" = "$address" ]
 	else
-		docker_address_match "$address"
+		docker_address_match "${address%%:*}"
 	fi
 }
 
