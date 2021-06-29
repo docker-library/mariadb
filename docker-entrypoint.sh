@@ -456,13 +456,19 @@ wsrep_enable_new_cluster() {
 	local wsrepdir="$(mysql_get_config 'wsrep-data-home-dir' "$@")"
 	local wsrepaddr="$(wsrep_address_normalize "$(mysql_get_config 'wsrep-node-address' "$@")")"
 
+	if [ -n "$WSREP_SKIP_AUTO_BOOTSTRAP" ]; then
+		return 1
+	fi
+
 	if [ -s "$wsrepdir/grastate.dat" ]; then
 		if [[ "$(cat "$wsrepdir/grastate.dat" | grep -i safe_to_bootstrap)" =~ 1 ]]; then
 			return 0
 		fi
+
+		return 1
 	fi
 
-	if [ -z "$address" ] || [ -n "$WSREP_SKIP_AUTO_BOOTSTRAP" ]  || [ -s "$wsrepdir/gvwstate.dat" ]; then
+	if [ -z "$address" ] || [ -s "$wsrepdir/gvwstate.dat" ]; then
 		return 1
 	fi
 
