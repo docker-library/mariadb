@@ -331,6 +331,156 @@ docker_setup_db() {
 	fi
 }
 
+# usage: unique_list <item1> <item2> ...
+#
+# it returns list with unique items
+unique_list() {
+	declare -A map
+
+	for item in "$@"; do
+		if [ -n "$item" ]; then
+			map["$item"]=true
+		fi
+	done
+
+	printf '%s ' "${!map[@]}"
+}
+
+# usage: get_ips
+#
+# it returns all machine IP addresses
+get_ips() {
+	ips=("127.0.0.1" $(hostname --all-ip-addresses))
+
+	# use default gateway to retrieve machine IP address. Destination address 8.8.8.8 doesn't have to be reachable
+	if ip=($(ip route get 8.8.8.8)); then
+		ips+=("${ip[6]}")
+	fi
+
+	# DNS reverse lookup from hostname to IP address
+	for hostname in $(unique_list $(hostname) $(hostname --short) $(hostname --long) $(hostname --all-fqdns)); do
+		if ip="$(getent ahosts "$hostname")"; then
+			ip=($(echo "$ip" | grep STREAM))
+			ips+=("${ip[0]}")
+		fi
+	done
+
+	unique_list "${ips[@]}"
+}
+
+# usage: get_hostnames
+#
+# it returns all machine DNS host names
+get_hostnames() {
+	hostnames=($(hostname) $(hostname --short) $(hostname --long) $(hostname --all-fqdns))
+
+	# DNS reverse lookup from IP address to hostname
+	for ip in $(get_ips); do
+		if hostname=($(getent hosts "$ip")); then
+			hostnames+=("${hostname[1]}")
+		fi
+	done
+
+	# FQDN short names
+	for hostname in "${hostnames[@]}"; do
+		hostnames+=("${hostname%%.[[:graph:]]*}")
+	done
+
+	unique_list "${hostnames[@]}"
+}
+
+# usage: docker_hostname_match <hostname>
+#    ie: docker_hostname_match node1.cluster.local
+# it returns true if provided hostname match with container hostname. Otherwise it returns false
+docker_hostname_match() {
+	for hostname in $(get_hostnames); do
+		if [ "$hostname" = "$1" ]; then
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+# usage: docker_ip_match <ip>
+#    ie: docker_ip_match 192.168.1.13
+# it returns true if provided IP address match with container IP address. Otherwise it returns false
+docker_ip_match() {
+	for ip in $(get_ips); do
+		if [ "$ip" = "$1" ]; then
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+# usage: docker_address_match <ip|hostname>
+#    ie: docker_address_match node1
+# it returns true if provided value match with container IP address or container hostname. Otherwise it returns false
+docker_address_match() {
+	local resolved="$(resolveip --silent "$1" 2>/dev/null)" # it converts hostname to ip or vice versa
+
+	docker_hostname_match "$1" || docker_ip_match "$1" || docker_hostname_match "$resolved" || docker_ip_match "$resolved"
+}
+
+# usage: wsrep_address_normalize <address>
+#    ie: wsrep_address_normalize gcomm://172.168.2.15
+# it always returns <address>:<port>
+wsrep_address_normalize() {
+	# it removes URI schemes like gcomm://
+	address="${1##*://}"
+
+	# it removes options suffix ?option1=value1[&option2=value2]
+	address="${address%%\?*}"
+
+	# it replaces commas ',' with spaces ' ' and converts it to array
+	address=(${address//,/ })
+
+	# first address from list of addresses. If item doesn't exist, returns empty string
+	address="${address[0]:-}"
+
+	case "$address" in
+		*:* | "")
+			;;
+		*)
+			address="${address}:4567";;
+	esac
+
+	echo "$address"
+}
+
+# usage: wsrep_enable_new_cluster <wsrep-cluster-address> [arg [arg [...]]]
+#    ie: wsrep_enable_new_cluster gcomm://node1,node2,node3 "$@"
+# it returns true if we need to set the --wsrep-new-cluster argument for the mysqld. Otherwise it returns false
+wsrep_enable_new_cluster() {
+	local address="$(wsrep_address_normalize "${WSREP_AUTO_BOOTSTRAP_ADDRESS:-$1}")"; shift
+	local wsrepdir="$(mysql_get_config 'wsrep-data-home-dir' "$@")"
+	local wsrepaddr="$(wsrep_address_normalize "$(mysql_get_config 'wsrep-node-address' "$@")")"
+
+	if [ -n "$WSREP_SKIP_AUTO_BOOTSTRAP" ]; then
+		return 1
+	fi
+
+	if [ -s "$wsrepdir/grastate.dat" ]; then
+		if [[ "$(cat "$wsrepdir/grastate.dat" | grep -i safe_to_bootstrap)" =~ 1 ]]; then
+			return 0
+		fi
+
+		return 1
+	fi
+
+	if [ -z "$address" ] || [ -s "$wsrepdir/gvwstate.dat" ]; then
+		return 1
+	fi
+
+	if [ -n "$wsrepaddr" ]; then
+		[ "$wsrepaddr" = "$address" ]
+	else
+		docker_address_match "${address%%:*}"
+	fi
+}
+
 # check arguments for an option that would cause mysqld to stop
 # return true if there is one
 _mysql_want_help() {
@@ -389,6 +539,26 @@ _main() {
 			echo
 			mysql_note "MariaDB init process done. Ready for start up."
 			echo
+		fi
+
+		# check if Galera replication is enabled from configuration files or command line arguments
+		if [ "$(mysql_get_config wsrep-on "$@")" = "TRUE" ]; then
+			mysql_note "Galera replication is enabled"
+
+			# determine cluster nodes addresses
+			if [ -z "${WSREP_CLUSTER_ADDRESS}" ]; then
+				WSREP_CLUSTER_ADDRESS="$(mysql_get_config wsrep-cluster-address "$@")"
+			else
+				set -- "$@" --wsrep-cluster-address="${WSREP_CLUSTER_ADDRESS}"
+			fi
+
+			mysql_note "Galera cluster addresses ${WSREP_CLUSTER_ADDRESS}"
+
+			# determine if this node is used for cluster bootstrapping. Skip it when cluster was already bootstrapped
+			if wsrep_enable_new_cluster "${WSREP_CLUSTER_ADDRESS}" "$@"; then
+				mysql_note "Enabled Galera cluster bootstrapping for this node"
+				set -- "$@" --wsrep-new-cluster
+			fi
 		fi
 	fi
 	exec "$@"
